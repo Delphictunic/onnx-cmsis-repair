@@ -26,7 +26,6 @@ class UnionFind:
         self.rank: dict[str, int] = {}
 
     def find(self, x: str) -> str:
-        # path compression
         if x not in self.parent:
             self.parent[x] = x
             self.rank[x] = 0
@@ -35,7 +34,6 @@ class UnionFind:
         return self.parent[x]
 
     def union(self, x: str, y: str) -> None:
-        # union by rank
         rx = self.find(x)
         ry = self.find(y)
         if rx == ry:
@@ -49,7 +47,6 @@ class UnionFind:
             self.rank[rx] += 1
 
     def groups(self) -> dict[str, list[str]]:
-        # return {root: [all members in group]}
         result: dict[str, list[str]] = {}
         for x in self.parent:
             r = self.find(x)
