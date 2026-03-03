@@ -1,0 +1,8 @@
+This repository incorporates and derives alignment constraint definitions from the CMSIS-NN project.
+
+CMSIS-NN is © Arm Limited and licensed under the Apache License, Version 2.0.
+You may obtain a copy of the License at:
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Any portions derived from CMSIS-NN remain subject to the terms of the Apache License 2.0.

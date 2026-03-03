@@ -1,21 +1,23 @@
 # CMSIS-NN Graph Repair Tool
+A deterministic, static ONNX graph repair tool that automatically zero-pads weight and bias tensors to satisfy CMSIS-NN fast-path alignment constraints, without requiring retraining. The transformation preserves original model behavior while reshaping internal dimensions to fully unlock optimized kernel routing on ARM Cortex-M microcontrollers.
 
-A static ONNX graph repair tool that automatically pads weight tensors to satisfy CMSIS-NN fast-path routing constraints, without retraining.
-
+CMSIS-NN is Arm’s embedded neural network library that provides highly optimized integer and DSP-accelerated kernels for efficient inference on resource-constrained microcontrollers.
 ---
 
 ## Motivation
 
-CMSIS-NN selects optimized kernels at runtime via wrapper functions that inspect tensor dimensions before dispatching. A model exported with channels that do not satisfy alignment requirements silently falls through to scalar fallback kernels — degrading inference throughput on Cortex-M devices with no warning at compile time.
+CMSIS-NN selects optimized kernels at runtime via wrapper functions that inspect tensor dimensions before dispatching. A model exported with channels that do not satisfy alignment requirements silently falls through to scalar fallback kernels degrading inference throughput on Cortex-M devices with no warning at compile time.
 
-Existing toolchains do not address this gap. The standard workflow is to retrain with aligned channel counts. This tool performs the alignment as a post-export graph transformation, preserving model semantics while unlocking fast-path dispatch.
+Existing toolchains do not address this gap, the standard workflow is to retrain with aligned channel counts. 
+
+This tool performs the alignment as a post-export graph transformation, preserving model semantics while unlocking fast-path dispatch. 
 
 ---
 
 ## Novelty
 
-- **Constraint knowledge base built from CMSIS-NN wrapper source** — every alignment requirement is traced to an exact routing condition in the C wrapper (e.g. `arm_convolve_wrapper_s8.c BRANCH B: (conv_params->stride.w * input_dims->c) % 4 == 0`), not inferred heuristically.
-- **Union-Find propagation of ONNX op semantics** — dimension variables are coupled by the shape compatibility rules of each op type, so padding one tensor automatically identifies all tensors that must move together.
+- **Constraint knowledge base built from CMSIS-NN wrapper source (open source github files)** — every alignment requirement is traced to an exact routing condition in the wrapper file. knowledge_base/constraints.py contains constraints from cmsis-nn documentation, this information is not assumed and strictly coherant to the original implementation.
+- **Union-Find propagation of ONNX op semantics** — dimension variables are coupled by the shape compatibility rules of each operation (node) type, so padding one tensor automatically identifies all tensors that must move together (crucial in stability and unchanged behaviour).
 - **Three-class violation taxonomy** — FREE, COUPLED, and LOCKED violations are distinguished before any patch is attempted, giving a clear audit trail of what was changed and why.
 - **Reshape safety detection** — tensors that feed into Reshape nodes with hardcoded shape constants are locked rather than silently patched, preventing shape mismatches downstream.
 
@@ -108,17 +110,16 @@ Transitivity is handled automatically. Unioning `stem_weight__dim0` with `stem_o
 
 For each weight tensor dimension that violates an alignment constraint:
 
-| Classification | Condition | Action |
-|---|---|---|
-| FREE | group size == 1, not locked, not graph I/O | patch directly |
-| COUPLED | group size > 1, no member locked or graph I/O | patch all group members together |
-| LOCKED | any member locked, or touches graph I/O, or downstream Reshape | report reason, skip |
+{Classification} {Condition} {Action}
+FREE, group size == 1, not locked, not graph I/O [patch directly]
+COUPLED, group size > 1, no member locked or graph I/O [patch all group members together]
+LOCKED, any member locked, or touches graph I/O, or downstream Reshape [report reason, skip]
 
 ---
 
 ## Example Output
 
-**MobileNet-style inverted residual block** (`test_model_3.onnx`):
+**MobileNet-style inverted residual block** (`test_model.onnx`):
 
 ```
 Node       | Op            | Constraint      | Current | Target | Status
@@ -157,3 +158,8 @@ The tool detects that `FreeConv` output feeds into a Reshape with a hardcoded sh
 ## Scope
 
 The tool handles standard CNN building blocks: Conv, DepthwiseConv, pointwise Conv, residual Add, branch Concat, fully connected Gemm. It is designed for the class of models deployed on Cortex-M via CMSIS-NN — MobileNet variants, lightweight ResNets, custom embedded CNNs. Transformer and RNN architectures are outside scope.
+
+ONNX graph intermediate representation allows higher level reasoning that allows consistent and behaviour preserving model transformation. 
+
+While currently designed for CMSIS-NN, the framework is backend agnostic and can be extended to other industry standard kernel selection and neural network optimization libraries that rely on alignment or shape based fast path routing.
+

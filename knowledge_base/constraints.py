@@ -1,3 +1,7 @@
+# This file derives alignment constraint definitions from the CMSIS-NN project.
+# CMSIS-NN is © Arm Limited, licensed under the Apache License, Version 2.0.
+# See the NOTICE file in the project root for full attribution.
+
 """
 CMSIS-NN Kernel Routing Constraints
 ====================================

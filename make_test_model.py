@@ -1,54 +1,51 @@
 """
-Comprehensive edge case test model for cmsis_nn_optimizer.
+Generates test_model_mixed.onnx — a mixed architecture test model with
+varied channel counts to avoid trivial all-8 padding targets.
 
-Covers:
-  1. FREE violation          — isolated node, nothing coupled downstream
-  2. COUPLED chain           — producer.out == consumer.in across 3 layers
-  3. COUPLED fan-out         — one producer feeds two consumers (Add merge)
-  4. LOCKED graph input      — channel dim of X is immovable
-  5. LOCKED graph output     — final output channels locked
-  6. Depthwise conv          — group attribute must update after padding
-  7. Depthwise into pointwise coupling — DW out coupled to PW in
-  8. Already aligned dims    — should produce zero violations (no false positives)
-  9. Inconsistent targets    — two violations in same group want different alignments
-                               (resolved by taking lcm of targets)
- 10. Reshape lock            — tensor flowing through Reshape is locked
+Architecture:
+  X [1, 3, 32, 32]
+  │
+  ├─ StemConv  [10, 3, 3, 3]    → stem  [1, 10, 16, 16]   # out=10 → target 12
+  │
+  ├─ BranchA
+  │   DW_A     [10, 1, 3, 3] g=10 → dw_a [1, 10, 16, 16]  # depthwise, ch=10 → 12
+  │   PW_A     [14, 10, 1, 1]   → pw_a  [1, 14, 16, 16]   # out=14 → target 16
+  │   MidA     [14, 14, 1, 1]   → mid_a [1, 14, 16, 16]   # in=14 → target 16
+  │
+  ├─ BranchB
+  │   PW_B     [10, 10, 1, 1]   → pw_b  [1, 10, 16, 16]   # out=10 → target 12
+  │   ConvB    [14, 10, 1, 1]   → conv_b [1, 14, 16, 16]  # out=14 → target 16
+  │
+  ├─ Add(mid_a, conv_b)         → merged [1, 14, 16, 16]
+  │
+  ├─ ProjConv  [6, 14, 1, 1]    → proj  [1, 6, 8, 8]      # out=6 → target 8
+  │
+  ├─ GlobalAveragePool          → gap   [1, 6, 1, 1]
+  │
+  └─ Gemm      [5, 6]           → output [1, 5]            # in=6 → target 8
 
-Graph (all float32, opset 11, ir_version 7):
-
-  X [1, 3, 16, 16]
-  │
-  ├─ BranchA ──────────────────────────────────────────────────────────────────
-  │   StemA [8,3,1,1]       → stem_a [1,8,16,16]   # case 8: aligned, no violation
-  │   DW_A  [8,1,3,3] g=8   → dw_a  [1,8,16,16]   # case 6+7: depthwise
-  │   PW_A  [6,8,1,1]       → pw_a  [1,6,16,16]   # case 2: COUPLED chain start
-  │   MidA  [6,6,1,1]       → mid_a [1,6,16,16]   # case 2: COUPLED chain middle
-  │   EndA  [6,6,1,1]       → end_a [1,6,16,16]   # case 2: COUPLED chain end
-  │
-  ├─ BranchB ──────────────────────────────────────────────────────────────────
-  │   StemB [6,3,1,1]       → stem_b [1,6,16,16]  # case 3: fan-out start
-  │   FanA  [6,6,1,1]       → fan_a  [1,6,16,16]  # case 3: fan-out consumer A
-  │   FanB  [6,6,1,1]       → fan_b  [1,6,16,16]  # case 3: fan-out consumer B
-  │   Add(fan_a, fan_b)     → add_b  [1,6,16,16]  # case 3: forces equality
-  │
-  ├─ Merge: Add(end_a, add_b) → merged [1,6,16,16]
-  │
-  ├─ FreeConv [10,6,1,1]    → free_out [1,10,16,16]  # case 1: FREE (out_ch=10)
-  │                                                    # case 9: in_ch=6 coupled to merged
-  │
-  ├─ Reshape(free_out → [1,10,256]) → reshaped [1,10,256]  # case 10: locks dims
-  │
-  ├─ Flatten → flat [1, 2560]
-  │
-  └─ Gemm [5, 2560] → output [1,5]   # case 5: output locked (graph output)
-                                      # case 4: input locked (Flatten output)
+Violations:
+  StemConv   output_channels=10  → 12  (COUPLED: feeds DW_A and PW_B)
+  DW_A       channels=10         → 12  (COUPLED: coupled to stem output)
+  PW_A       input_channels=10   → 12  (COUPLED: coupled to DW_A output)
+  PW_A       output_channels=14  → 16  (COUPLED: coupled to MidA)
+  MidA       input_channels=14   → 16  (COUPLED: coupled to PW_A output)
+  MidA       output_channels=14  → 16  (COUPLED: coupled to Add)
+  PW_B       input_channels=10   → 12  (COUPLED: coupled to stem output)
+  PW_B       output_channels=10  → 12  (COUPLED: coupled to ConvB input)
+  ConvB      input_channels=10   → 12  (COUPLED: coupled to PW_B output)
+  ConvB      output_channels=14  → 16  (COUPLED: coupled to Add)
+  ProjConv   input_channels=14   → 16  (COUPLED: coupled to Add output)
+  ProjConv   output_channels=6   → 8   (COUPLED: coupled to Gemm input)
+  Gemm       input_features=6    → 8   (COUPLED: coupled to ProjConv output)
+  StemConv   input_channels=3    → 4   (LOCKED: graph input X)
 """
 
 import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
 
-np.random.seed(42)
+np.random.seed(7)
 
 
 def cv(name, shape):
@@ -65,7 +62,7 @@ def b(name, size):
     return numpy_helper.from_array(np.zeros(size, dtype=np.float32), name=name)
 
 
-def conv(inp, wname, bname, out, name, kernel=1, pad=0, group=1):
+def conv(inp, wname, bname, out, name, kernel=1, pad=0, stride=1, group=1):
     return helper.make_node(
         "Conv",
         inputs=[inp, wname, bname],
@@ -73,57 +70,56 @@ def conv(inp, wname, bname, out, name, kernel=1, pad=0, group=1):
         name=name,
         kernel_shape=[kernel, kernel],
         pads=[pad] * 4,
+        strides=[stride, stride],
         group=group,
     )
 
 
-def make_model() -> onnx.ModelProto:
-    X = cv("X", [1, 3, 16, 16])
+def make_mixed_model() -> onnx.ModelProto:
+    X = cv("X", [1, 3, 32, 32])
 
-    # ── BranchA ───────────────────────────────────────────────────────────────
-    n_stem_a = conv("X",      "stem_a_w", "stem_a_b", "stem_a", "StemA")
-    n_dw_a   = helper.make_node(
+    # ── StemConv ──────────────────────────────────────────────────────────────
+    n_stem = conv("X", "stem_w", "stem_b", "stem", "StemConv",
+                  kernel=3, pad=1, stride=2)
+
+    # ── BranchA: DW → PW → Mid ────────────────────────────────────────────────
+    n_dw_a = helper.make_node(
         "Conv",
-        inputs=["stem_a", "dw_a_w", "dw_a_b"],
+        inputs=["stem", "dw_a_w", "dw_a_b"],
         outputs=["dw_a"],
         name="DW_A",
         kernel_shape=[3, 3],
         pads=[1, 1, 1, 1],
-        group=8,
+        group=10,
     )
     n_pw_a  = conv("dw_a",  "pw_a_w",  "pw_a_b",  "pw_a",  "PW_A")
     n_mid_a = conv("pw_a",  "mid_a_w", "mid_a_b", "mid_a", "MidA")
-    n_end_a = conv("mid_a", "end_a_w", "end_a_b", "end_a", "EndA")
 
-    # ── BranchB ───────────────────────────────────────────────────────────────
-    n_stem_b = conv("X",      "stem_b_w", "stem_b_b", "stem_b", "StemB")
-    n_fan_a  = conv("stem_b", "fan_a_w",  "fan_a_b",  "fan_a",  "FanA")
-    n_fan_b  = conv("stem_b", "fan_b_w",  "fan_b_b",  "fan_b",  "FanB")
-    n_add_b  = helper.make_node("Add", ["fan_a", "fan_b"], ["add_b"],  name="AddB")
+    # ── BranchB: PW → Conv ────────────────────────────────────────────────────
+    n_pw_b   = conv("stem",  "pw_b_w",  "pw_b_b",  "pw_b",  "PW_B")
+    n_conv_b = conv("pw_b",  "conv_b_w","conv_b_b","conv_b", "ConvB")
 
     # ── Merge ─────────────────────────────────────────────────────────────────
-    n_merge = helper.make_node("Add", ["end_a", "add_b"], ["merged"], name="Merge")
+    n_merge = helper.make_node("Add", ["mid_a", "conv_b"], ["merged"], name="Merge")
 
-    # ── FreeConv ──────────────────────────────────────────────────────────────
-    n_free = conv("merged", "free_w", "free_b", "free_out", "FreeConv")
+    # ── ProjConv ──────────────────────────────────────────────────────────────
+    n_proj = conv("merged", "proj_w", "proj_b", "proj", "ProjConv",
+                  kernel=1, pad=0, stride=2)
 
-    # ── Reshape ───────────────────────────────────────────────────────────────
-    shape_tensor = numpy_helper.from_array(
-        np.array([1, 10, 256], dtype=np.int64), name="reshape_shape"
-    )
-    n_reshape = helper.make_node(
-        "Reshape",
-        inputs=["free_out", "reshape_shape"],
-        outputs=["reshaped"],
-        name="Reshape1",
+    # ── GlobalAveragePool ─────────────────────────────────────────────────────
+    n_gap = helper.make_node(
+        "GlobalAveragePool",
+        inputs=["proj"],
+        outputs=["gap"],
+        name="GAP",
     )
 
-    # ── Flatten ───────────────────────────────────────────────────────────────
-    n_flatten = helper.make_node(
+    # ── Flatten before Gemm ───────────────────────────────────────────────────
+    n_flat = helper.make_node(
         "Flatten",
-        inputs=["reshaped"],
+        inputs=["gap"],
         outputs=["flat"],
-        name="Flatten1",
+        name="Flat1",
         axis=1,
     )
 
@@ -136,69 +132,55 @@ def make_model() -> onnx.ModelProto:
         transB=1,
     )
 
-    intermediates = [
-        cv("stem_a",   [1,  8, 16, 16]),
-        cv("dw_a",     [1,  8, 16, 16]),
-        cv("pw_a",     [1,  6, 16, 16]),
-        cv("mid_a",    [1,  6, 16, 16]),
-        cv("end_a",    [1,  6, 16, 16]),
-        cv("stem_b",   [1,  6, 16, 16]),
-        cv("fan_a",    [1,  6, 16, 16]),
-        cv("fan_b",    [1,  6, 16, 16]),
-        cv("add_b",    [1,  6, 16, 16]),
-        cv("merged",   [1,  6, 16, 16]),
-        cv("free_out", [1, 10, 16, 16]),
-        cv("reshaped", [1, 10, 256]),
-        helper.make_tensor_value_info("flat", TensorProto.FLOAT, [1, 2560]),
-    ]
-
     graph = helper.make_graph(
         nodes=[
-            n_stem_a, n_dw_a, n_pw_a, n_mid_a, n_end_a,
-            n_stem_b, n_fan_a, n_fan_b, n_add_b,
-            n_merge, n_free, n_reshape, n_flatten, n_gemm,
+            n_stem,
+            n_dw_a, n_pw_a, n_mid_a,
+            n_pw_b, n_conv_b,
+            n_merge,
+            n_proj, n_gap, n_flat, n_gemm,
         ],
-        name="edge_case_graph",
+        name="mixed_graph",
         inputs=[X],
         outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 5])],
         initializer=[
-            w("stem_a_w", (8, 3, 1, 1)), b("stem_a_b", 8),
-            w("dw_a_w",   (8, 1, 3, 3)), b("dw_a_b",   8),
-            w("pw_a_w",   (6, 8, 1, 1)), b("pw_a_b",   6),
-            w("mid_a_w",  (6, 6, 1, 1)), b("mid_a_b",  6),
-            w("end_a_w",  (6, 6, 1, 1)), b("end_a_b",  6),
-            w("stem_b_w", (6, 3, 1, 1)), b("stem_b_b", 6),
-            w("fan_a_w",  (6, 6, 1, 1)), b("fan_a_b",  6),
-            w("fan_b_w",  (6, 6, 1, 1)), b("fan_b_b",  6),
-            w("free_w",   (10, 6, 1, 1)), b("free_b",  10),
-            shape_tensor,
-            w("gemm_w",   (5, 2560)),
+            w("stem_w",   (10,  3, 3, 3)), b("stem_b",   10),
+            w("dw_a_w",   (10,  1, 3, 3)), b("dw_a_b",   10),
+            w("pw_a_w",   (14, 10, 1, 1)), b("pw_a_b",   14),
+            w("mid_a_w",  (14, 14, 1, 1)), b("mid_a_b",  14),
+            w("pw_b_w",   (10, 10, 1, 1)), b("pw_b_b",   10),
+            w("conv_b_w", (14, 10, 1, 1)), b("conv_b_b", 14),
+            w("proj_w",   ( 6, 14, 1, 1)), b("proj_b",    6),
+            w("gemm_w",   ( 5,  6)),
             b("gemm_b",   5),
         ],
-        value_info=intermediates,
+        value_info=[
+            cv("stem",   [1, 10, 16, 16]),
+            cv("dw_a",   [1, 10, 16, 16]),
+            cv("pw_a",   [1, 14, 16, 16]),
+            cv("mid_a",  [1, 14, 16, 16]),
+            cv("pw_b",   [1, 10, 16, 16]),
+            cv("conv_b", [1, 14, 16, 16]),
+            cv("merged", [1, 14, 16, 16]),
+            cv("proj",   [1,  6,  8,  8]),
+            cv("gap",    [1,  6,  1,  1]),
+            helper.make_tensor_value_info("flat", TensorProto.FLOAT, [1, 6]),
+        ],
     )
 
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 11)])
-    model.ir_version = 7
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
     onnx.checker.check_model(model)
     return model
 
 
 if __name__ == "__main__":
-    model = make_model()
-    onnx.save(model, "test_model_edge.onnx")
-    print("Saved test_model_edge.onnx")
+    model = make_mixed_model()
+    onnx.save(model, "test_model_mixed.onnx")
+    print("Saved test_model_mixed.onnx")
     print()
-    print("Edge cases covered:")
-    print("  1. FREE          — FreeConv output_channels=10, nothing downstream")
-    print("  2. COUPLED chain — PW_A → MidA → EndA (3-layer chain)")
-    print("  3. COUPLED fanout— StemB → (FanA, FanB) → Add")
-    print("  4. LOCKED input  — StemA/StemB input_channels=3 (graph input X)")
-    print("  5. LOCKED output — Gemm output_channels=5 (graph output)")
-    print("  6. Depthwise     — DW_A group=8, no violation (already aligned)")
-    print("  7. DW→PW couple  — DW_A out feeds PW_A in")
-    print("  8. No false pos  — StemA, DW_A channels already %4 aligned")
-    print("  9. Max target    — merged group has %2 and %4 requirements, max wins")
-    print(" 10. Reshape lock  — free_out → Reshape → Flatten → Gemm dims locked")
-    print()
-    print("Update pipeline.py model_path to 'test_model_edge.onnx' before running.")
+    print("Expected targets (not all 8):")
+    print("  StemConv / DW_A / PW_B  channels=10  → 12")
+    print("  PW_A / MidA / ConvB     channels=14  → 16")
+    print("  ProjConv / Gemm         channels=6   → 8")
+    print("  StemConv input_channels=3            → LOCKED (graph input)")
