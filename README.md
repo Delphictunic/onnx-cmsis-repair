@@ -1,8 +1,8 @@
 # CMSIS-NN Graph Repair Tool
 
-A deterministic, static ONNX graph repair tool that automatically zero-pads weight and bias tensors to satisfy CMSIS-NN fast-path alignment constraints, without requiring retraining. The transformation preserves original model behavior while reshaping internal dimensions to fully unlock optimized kernel routing on ARM Cortex-M microcontrollers.
-
 CMSIS-NN is Arm's embedded neural network library that provides highly optimized integer and DSP-accelerated kernels for efficient inference on resource-constrained microcontrollers.
+
+A deterministic, static ONNX graph repair tool that automatically zero-pads weight and bias tensors to satisfy CMSIS-NN fast-path alignment constraints, without requiring retraining. The transformation preserves original model behavior while reshaping internal dimensions to fully unlock optimized kernel routing on ARM Cortex-M microcontrollers.
 
 ---
 
