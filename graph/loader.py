@@ -1,3 +1,5 @@
+import onnx
+from onnx import shape_inference
 """
 ONNX open neural network exchange. Allows portability between different frameworks.
 Stores a computational graph of a neural network. We load the model perform checking for consistency and
@@ -6,10 +8,6 @@ developed by Google, provides efficient serialization and deserialization of dat
 of converting data structures stored in memory into a format that can be stored on disk or transmitted over a network.
 We use value_info, input, output, and initializer to extract tensor shapes, names, and dtypes.
 """
-
-import onnx
-from onnx import shape_inference
-
 
 def load_model(path: str) -> onnx.ModelProto:
     model = onnx.load(path)

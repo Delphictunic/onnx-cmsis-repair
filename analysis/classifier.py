@@ -1,16 +1,6 @@
-"""
-Classifies each constraint violation as FREE, COUPLED, or LOCKED.
-Depends on constraints defined in knowledge_base.constraints.py and groups found in propagator.UnionFind.
-FREE violations are those which can be padded without affecting other dimensions.
-COUPLED violations are those which can be padded, but affect other dimensions.
-LOCKED violations are those which cannot be padded.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-
 import onnx
+from __future__ import annotations
+from dataclasses import dataclass
 from graph.dim_variables import get_dim_variable
 from graph.propagator import UnionFind
 from knowledge_base.constraints import (
@@ -18,6 +8,13 @@ from knowledge_base.constraints import (
     get_patchable_constraints,
 )
 
+"""
+Classifies each constraint violation as FREE, COUPLED, or LOCKED.
+Depends on constraints defined in knowledge_base.constraints.py and groups found in propagator.UnionFind.
+FREE violations are those which can be padded without affecting other dimensions.
+COUPLED violations are those which can be padded, but affect other dimensions.
+LOCKED violations are those which cannot be padded.
+"""
 
 @dataclass
 class Violation:
@@ -41,7 +38,12 @@ def _tensor_name_from_dim_var(dim_var: str) -> str:
 
 
 def _effective_op_type(node) -> str:
-    """ONNX represents depthwise conv as Conv with group == in_channels."""
+    """
+    ONNX has no dedicated DepthwiseConv op type. A depthwise convolution is
+    represented as a Conv node with group == input_channels (i.e. group > 1).
+    This function maps that to "DepthwiseConv" so the knowledge base lookup
+    uses the correct constraint entry instead of the standard Conv entry.
+    """
     if node.op_type == "Conv":
         for attr in node.attribute:
             if attr.name == "group" and attr.i > 1:

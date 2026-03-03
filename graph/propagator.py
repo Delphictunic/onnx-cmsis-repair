@@ -1,3 +1,6 @@
+import onnx
+from __future__ import annotations
+from graph.dim_variables import get_dim_variable
 """
 Walks the ONNX graph and unions dimension variables that must be equal
 by ONNX operation semantics (Conv, Add, Concat, Gemm, Reshape, Flatten).
@@ -13,13 +16,6 @@ static weight padding.
 Returns a UnionFind (groups of coupled dim variables) and a locked set.
 The locked set is used to identify dimensions that are not affected by padding operations.
 """
-
-from __future__ import annotations
-
-import onnx
-from graph.dim_variables import get_dim_variable
-
-
 class UnionFind:
     def __init__(self) -> None:
         self.parent: dict[str, str] = {}
