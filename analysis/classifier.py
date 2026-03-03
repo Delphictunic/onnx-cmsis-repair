@@ -1,5 +1,6 @@
-import onnx
 from __future__ import annotations
+
+import onnx
 from dataclasses import dataclass
 from graph.dim_variables import get_dim_variable
 from graph.propagator import UnionFind

@@ -1,9 +1,10 @@
+from __future__ import annotations
+
+import copy
+from typing import Any
 
 import numpy as np
 import onnx
-import copy
-from __future__ import annotations
-from typing import Any
 from onnx import numpy_helper, shape_inference
 
 """

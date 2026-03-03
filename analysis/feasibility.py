@@ -55,6 +55,6 @@ def get_padding_plan(feasible: list[Violation], uf) -> dict[str, int]:
             plan[m] = target
 
     for var, target in sorted(plan.items()):
-        print(f"  padding_plan: {var} \u2192 {target}")
+        print(f"  padding_plan: {var} → {target}")
 
     return plan

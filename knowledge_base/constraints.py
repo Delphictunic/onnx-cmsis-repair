@@ -1,32 +1,54 @@
 """
 CMSIS-NN Kernel Routing Constraints
+====================================
+This file encodes the EXACT preconditions that CMSIS-NN wrapper functions
+use to select optimized kernels over fallback implementations.
 
-Using CMSIS-NN/Source/ConvolutionFunctions open source GitHub repository.
+Every constraint entry is traced to a specific source file and the routing
+condition that gates the fast path. Where multiple backends exist (DSP, MVE,
+generic), the MOST RESTRICTIVE common condition is recorded so that padding
+guarantees the fast path on ALL supported cores.
 
-Wrapper files are used to route the convolution operations to the appropriate kernel.
+Source files analyzed:
+  - arm_convolve_wrapper_s8.c        (V.2.5.1, 04 Nov 2024)
+  - arm_convolve_wrapper_s4.c        (V.1.2.0, 27 May 2024)
+  - arm_convolve_wrapper_s16.c       (V.3.0.0, 23 Apr 2024)
+  - arm_depthwise_conv_wrapper_s8.c  (V.2.2.1, 17 Jan 2025)
+  - arm_depthwise_conv_wrapper_s4.c  (V.1.0.0, 30 Oct 2023)
+  - arm_depthwise_conv_wrapper_s16.c (V.1.1.0, 20 Jan 2023)
+  - arm_convolve_1_x_n_s8.c         (stride*ch % 4 constraint detail)
+  - arm_convolve_1_x_n_s4.c         (stride*ch % 4 constraint detail)
+  - arm_depthwise_conv_s8_opt.c      (inner loop structure)
+  - arm_depthwise_conv_3x3_s8.c     (inner loop structure)
+  - arm_depthwise_conv_fast_s16.c   (inner loop structure)
+  - arm_depthwise_conv_s4_opt.c     (inner loop structure)
 
-List of all source files analyzed : 
+How to read this file
+---------------------
+Each op type maps to a dict of named constraints. Each constraint has:
 
-    - arm_convolve_wrapper_s8.c        (V.2.5.1, 04 Nov 2024)
-    - arm_convolve_wrapper_s4.c        (V.1.2.0, 27 May 2024)
-    - arm_convolve_wrapper_s16.c       (V.3.0.0, 23 Apr 2024)
-    - arm_depthwise_conv_wrapper_s8.c  (V.2.2.1, 17 Jan 2025)
-    - arm_depthwise_conv_wrapper_s4.c  (V.1.0.0, 30 Oct 2023)
-    - arm_depthwise_conv_wrapper_s16.c (V.1.1.0, 20 Jan 2023)
-    - arm_convolve_1_x_n_s8.c         (stride*ch % 4 constraint detail)
-    - arm_convolve_1_x_n_s4.c         (stride*ch % 4 constraint detail)
-    - arm_depthwise_conv_s8_opt.c      (inner loop structure)
-    - arm_depthwise_conv_3x3_s8.c     (inner loop structure)
-    - arm_depthwise_conv_fast_s16.c   (inner loop structure)
-    - arm_depthwise_conv_s4_opt.c     (inner loop structure)
+  dim_index   : which axis of the weight/filter tensor the constraint acts on
+                  0 = output_channels  (N dim of weight [out_ch, in_ch, kH, kW])
+                  1 = input_channels   (C dim of weight [out_ch, in_ch, kH, kW])
+                NOTE: DepthwiseConv weight shape is [out_ch, 1, kH, kW].
+                  Axis 0 IS the channel count. There is no meaningful axis 1
+                  (it is always 1 per group). Only axis 0 is constrained.
 
-Reading the routing conditions in each wrapper's branch tree, then identifying which conditions depend on a dimension of the weight tensor (input_channels, output_channels)
-because only those can be fixed by static padding.
+  alignment   : value % alignment == 0 required for the fast path.
+                None = no alignment requirement.
 
-Conditions that depend on runtime parameters (stride, dilation, padding, kernel size, batch size) are not patchable even if they appear in the same branch.
+  patchable   : True  = can be fixed by zero-padding the weight tensor axis.
+                False = depends on runtime params (stride, dilation, padding,
+                        kernel size) that cannot be changed by static graph repair.
+
+  kernel_path : which optimised kernel is unlocked when this condition holds.
+
+  description : source citation with the EXACT condition from the C source.
 """
 
-#internal helper function to avoid repeating the dict keys on every entry
+# ---------------------------------------------------------------------------
+# Internal helper
+# ---------------------------------------------------------------------------
 
 def _c(dim_index, alignment, patchable, kernel_path, description):
     return {
@@ -38,38 +60,44 @@ def _c(dim_index, alignment, patchable, kernel_path, description):
     }
 
 
+# ---------------------------------------------------------------------------
+# Constraint tables — one entry per op variant per constraint
+# ---------------------------------------------------------------------------
+
 _CONSTRAINTS = {
 
-    
+    # =========================================================================
     # Conv_s8  (arm_convolve_wrapper_s8)
-
-
+    # =========================================================================
+    #
+    # WRAPPER ROUTING (arm_convolve_wrapper_s8.c):
+    #
     # BRANCH A  →  arm_convolve_1x1_s8_fast  or  arm_convolve_1x1_s8
-
     #   if (padding.w == 0 && padding.h == 0
     #       && filter_dims->w == 1 && filter_dims->h == 1
     #       && dilation.w == 1 && dilation.h == 1
-    #       && input_dims->c == filter_dims->c)         
+    #       && input_dims->c == filter_dims->c)          ← non-grouped only
     #     stride == 1  →  arm_convolve_1x1_s8_fast
     #     stride != 1  →  arm_convolve_1x1_s8
-    
+    #
     # BRANCH B  →  arm_convolve_1_x_n_s8
-
     #   elif (input_dims->h == 1
     #         && dilation.w == 1
     #         && filter_dims->h == 1
-    #         && (conv_params->stride.w * input_dims->c) % 4 == 0   
+    #         && (conv_params->stride.w * input_dims->c) % 4 == 0   ← KEY
     #         && input_dims->c == filter_dims->c)
-    
+    #
     # BRANCH C  →  arm_convolve_s8  (generic fallback)
-    
-    # Dimension-based Constraint that is patchable :
-    #   In BRANCH B: 
-    #   (stride_w * input_channels) % 4 == 0.
-    #   For stride_w == 1  → input_channels % 4 == 0
-    #   For stride_w == 2  → input_channels % 2 == 0
-    #   alignment=4 (satisfies all stride values).
-    
+    #
+    # The ONLY dimension-based alignment constraint that is statically patchable
+    # is in BRANCH B: (stride_w * input_channels) % 4 == 0.
+    # For stride_w == 1  → input_channels % 4 == 0
+    # For stride_w == 2  → input_channels % 2 == 0
+    # We conservatively record alignment=4 (satisfies all stride values).
+    #
+    # arm_convolve_s8.c also states: "Optimal use case for DSP/MVE is when
+    # input and output channels are multiples of 4 or at least greater than 4."
+    # This drives output_channels alignment=4 as a performance (not routing) constraint.
 
     "Conv_s8": {
 
@@ -99,29 +127,29 @@ _CONSTRAINTS = {
         ),
     },
 
+    # =========================================================================
     # Conv_s4  (arm_convolve_wrapper_s4)
-    
+    # =========================================================================
+    #
+    # WRAPPER ROUTING (arm_convolve_wrapper_s4.c):
+    #
     # BRANCH A  →  arm_convolve_1x1_s4_fast  or  arm_convolve_1x1_s4
-    
     #   if (padding.w == 0 && padding.h == 0
     #       && filter_dims->w == 1 && filter_dims->h == 1
     #       && dilation.w == 1 && dilation.h == 1)
-    
+    #
     # BRANCH B  →  arm_convolve_1_x_n_s4
-
     #   elif (input_dims->h == 1
     #         && dilation.w == 1
     #         && filter_dims->h == 1
     #         && (conv_params->stride.w * input_dims->c) % 4 == 0   ← KEY
     #         && input_dims->c == filter_dims->c)
-    
-
+    #
     # BRANCH C (MVE only)  →  arm_convolve_even_s4
-
     #   elif ((filter_dims->h * filter_dims->w * input_dims->c) & 0x1) == 0
     #   i.e. rhs_cols = kH*kW*input_channels must be EVEN.
     #   arm_convolve_even_s4 hard-returns ARG_ERROR if rhs_cols is odd.
-    
+    #
     # BRANCH D  →  arm_convolve_s4  (generic fallback)
 
     "Conv_s4": {
@@ -165,12 +193,18 @@ _CONSTRAINTS = {
         ),
     },
 
+    # =========================================================================
     # Conv_s16  (arm_convolve_wrapper_s16)
-    
+    # =========================================================================
+    #
+    # WRAPPER ROUTING (arm_convolve_wrapper_s16.c):
+    #
     # PASS-THROUGH — the wrapper unconditionally calls arm_convolve_s16.
     # There is NO routing branch. No hard alignment gate exists.
+    #
     # arm_convolve_s16.c comment: "Optimal use case for DSP/MVE is when input
     # and output channels are multiples of 4 or at least greater than 4."
+    # This is a performance hint only.
 
     "Conv_s16": {
 
@@ -198,13 +232,17 @@ _CONSTRAINTS = {
         ),
     },
 
+    # =========================================================================
     # DepthwiseConv_s8  (arm_depthwise_conv_wrapper_s8)
-    
+    # =========================================================================
+    #
+    # WRAPPER ROUTING (arm_depthwise_conv_wrapper_s8.c V.2.2.1):
+    #
     # [MVE only] SPECIAL PATH — convert to regular conv
     #   if (input_dims->c == 1
     #       && output_dims->c > CONVERT_DW_CONV_WITH_ONE_INPUT_CH_AND_OUTPUT_CH_ABOVE_THRESHOLD)
     #   → arm_depthwise_conv_to_conv_s8  (delegates to arm_convolve_wrapper_s8)
-    
+    #
     # OPTIMISED PATH
     #   if (ch_mult == 1
     #       && input_dims->n == 1
@@ -215,26 +253,26 @@ _CONSTRAINTS = {
     #       → arm_depthwise_conv_3x3_s8
     #     else:
     #       → arm_depthwise_conv_s8_opt
-    
+    #
     # FALLBACK
     #   else → arm_depthwise_conv_s8  (generic, any dimensions)
-    
+    #
     # INNER LOOP ANALYSIS:
-    
+    #
     # arm_depthwise_conv_3x3_s8.c:
     #   for (; in_ch <= (input_ch - 4); in_ch += 4) { ... }   ← 4-wide loop
     #   // Leftover: for (; in_ch < input_ch; ++in_ch)         ← scalar tail
     #   → channels % 4 == 0 eliminates the scalar tail.
-    
+    #
     # arm_depthwise_conv_s8_opt.c (DSP path):
     #   row_count = output_ch / 4;   ← 4 channels per iteration
     #   row_count = output_ch & 0x3; ← scalar tail
     #   → channels % 4 == 0 eliminates scalar tail.
-    
+    #
     # arm_depthwise_conv_s8_opt.c (MVE path):
     #   active_ch = MIN(CH_IN_BLOCK_MVE, remaining_ch)
     #   Processes in blocks; any multiple of 4 is optimal.
-    
+    #
     # For DepthwiseConv with ch_mult==1 (the only patchable case):
     #   input_channels == output_channels
     #   ONNX weight shape: [out_channels, 1, kH, kW]
@@ -258,18 +296,22 @@ _CONSTRAINTS = {
         ),
     },
 
+    # =========================================================================
     # DepthwiseConv_s4  (arm_depthwise_conv_wrapper_s4)
-    
+    # =========================================================================
+    #
+    # WRAPPER ROUTING (arm_depthwise_conv_wrapper_s4.c):
+    #
     # OPTIMISED PATH
     #   if (ch_mult == 1
     #       && input_dims->n == 1
     #       && dilation.w == 1
     #       && dilation.h == 1)
     #   → arm_depthwise_conv_s4_opt
-    
+    #
     # FALLBACK
     #   else → arm_depthwise_conv_s4
-    
+    #
     # arm_depthwise_conv_s4_opt.c (DSP path):
     #   row_count = output_ch / 4;
     #   Tail handled separately.
@@ -292,21 +334,25 @@ _CONSTRAINTS = {
         ),
     },
 
+    # =========================================================================
     # DepthwiseConv_s16  (arm_depthwise_conv_wrapper_s16)
-    
+    # =========================================================================
+    #
+    # WRAPPER ROUTING (arm_depthwise_conv_wrapper_s16.c):
+    #
     #   if USE_FAST_DW_CONV_S16_FUNCTION(dw_conv_params, filter_dims, input_dims):
     #     → arm_depthwise_conv_fast_s16
     #   else:
     #     → arm_depthwise_conv_s16
-    
+    #
     # The macro USE_FAST_DW_CONV_S16_FUNCTION gates on ch_mult==1 and that
     # a DSP/MVE core is present and buffer is available.
-    
+    #
     # arm_depthwise_conv_fast_s16.c (DSP path):
     #   row_count = output_ch / 4;    ← 4 channels per iteration
     #   row_count = output_ch & 0x3;  ← scalar tail
     #   → channels % 4 == 0 for optimal throughput.
-    
+    #
     # arm_depthwise_conv_fast_s16.c (MVE path):
     #   Processes in 4-wide int16 vector loads/stores.
 
@@ -330,7 +376,20 @@ _CONSTRAINTS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Backwards-compatible aliases — ONNX op type strings → s8 default variant
+# ---------------------------------------------------------------------------
+
+_CONSTRAINTS["Conv"]          = _CONSTRAINTS["Conv_s8"]
+_CONSTRAINTS["DepthwiseConv"] = _CONSTRAINTS["DepthwiseConv_s8"]
+_CONSTRAINTS["Gemm"]          = {}
+_CONSTRAINTS["MaxPool"]       = {}
+_CONSTRAINTS["AveragePool"]   = {}
+
+
+# ---------------------------------------------------------------------------
 # Public accessor API
+# ---------------------------------------------------------------------------
 
 def supported_ops():
     """Return list of op type keys with constraint entries."""
@@ -348,6 +407,14 @@ def get_patchable_constraints(op_type):
         name: c
         for name, c in _CONSTRAINTS.get(op_type, {}).items()
         if c["patchable"]
+    }
+
+
+def get_non_patchable_constraints(op_type: str) -> dict:
+    return {
+        name: c
+        for name, c in _CONSTRAINTS.get(op_type, {}).items()
+        if not c.get("patchable", True)
     }
 
 
@@ -386,7 +453,12 @@ def get_kernel_path(op_type, constraint_name):
     return c["kernel_path"] if c else ""
 
 
+CONSTRAINTS = _CONSTRAINTS  # backwards-compatible alias
+
+
+# ---------------------------------------------------------------------------
 # Self-test / documentation dump
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     for op in supported_ops():
