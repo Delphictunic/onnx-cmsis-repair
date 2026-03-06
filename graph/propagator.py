@@ -143,13 +143,21 @@ def propagate_constraints(
                 _try_union(uf, dim_vars, outputs[0], 1, inputs[1], 0)
                 _try_union(uf, dim_vars, inputs[0], 0, outputs[0], 0)
 
-        elif op in ("Reshape", "Flatten"):
-            for out_name in outputs:
-                try:
-                    for dim_index in range(len(dim_vars[out_name])):
-                        v = get_dim_variable(dim_vars, out_name, dim_index)
-                        locked.add(v)
-                except KeyError:
-                    pass
+        elif op == "Reshape":
+            # only lock if the shape input is a stored constant initializer
+            initializer_names = {init.name for init in model.graph.initializer}
+            if len(inputs) >= 2 and inputs[1] in initializer_names:
+                for out_name in outputs:
+                    try:
+                        for dim_index in range(len(dim_vars[out_name])):
+                            v = get_dim_variable(dim_vars, out_name, dim_index)
+                            locked.add(v)
+                    except KeyError:
+                        pass
+
+        elif op == "Flatten":
+            # Flatten computes its output shape dynamically from input
+            # do not lock -- output channels propagate freely from the input tensor
+            pass
 
     return (uf, locked)
