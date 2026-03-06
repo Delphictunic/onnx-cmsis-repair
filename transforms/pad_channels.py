@@ -68,8 +68,6 @@ def pad_tensor(
     axis: int,
     target_size: int,
 ) -> np.ndarray:
-    # np.pad with zeros along axis to reach target_size
-    # raise ValueError if array.shape[axis] > target_size
     current = array.shape[axis]
     if current > target_size:
         raise ValueError(
@@ -87,8 +85,6 @@ def update_tensor_shape(
     tensor_name: str,
     new_shape: list[int],
 ) -> None:
-    # Find tensor in model.graph.value_info or graph.input or graph.output
-    # Update its type.tensor_type.shape dims in place
     for vi in model.graph.value_info:
         if vi.name == tensor_name:
             _set_shape(vi.type.tensor_type.shape, new_shape)
@@ -153,6 +149,7 @@ def apply_padding_plan(
             new_initializers.append(init)
     del model.graph.initializer[:]
     model.graph.initializer.extend(new_initializers)
+
     # pad bias tensors to match new output channel count
     bias_updates: dict[str, np.ndarray] = {}
     for node in model.graph.node:
@@ -189,18 +186,15 @@ def apply_padding_plan(
         del model.graph.initializer[:]
         model.graph.initializer.extend(new_inits)
 
-    # Update group attribute on depthwise conv nodes to match padded channels
+    # update group attribute on depthwise conv nodes to match padded channels
     for node in model.graph.node:
         if node.op_type != "Conv":
             continue
-        # check if it's depthwise (group > 1)
         for attr in node.attribute:
             if attr.name == "group" and attr.i > 1:
-                # find the weight initializer for this node
                 weight_name = node.input[1] if len(node.input) > 1 else None
                 if weight_name is None:
                     break
-                # find new out_channels from updated initializer
                 for init in model.graph.initializer:
                     if init.name == weight_name:
                         new_out_ch = init.dims[0]
@@ -208,11 +202,10 @@ def apply_padding_plan(
                         break
                 break
 
-    # clear all stale shape annotations so infer_shapes
-    # to fix the metadata propagation bug
+    # clear stale intermediate shape annotations only
+    # leave graph inputs and outputs intact so infer_shapes
+    # can merge against valid existing shapes without warning
     del model.graph.value_info[:]
-    for out in model.graph.output:
-        out.type.tensor_type.shape.Clear()
 
     # re-run shape inference to propagate all new shapes globally
     model = shape_inference.infer_shapes(model)
